@@ -1,4 +1,6 @@
 import os
+
+import keras.models
 from matplotlib import pyplot as plt
 import tensorflow as tf
 import tensorflow_io as tfio
@@ -29,7 +31,7 @@ if __name__ == "__main__":
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
     POS = "Data/Audio/acafly/"
-    NEG = "Data/Audio/acowoo/"
+    NEG = "Data/Audio/ameavo/"
 
     pos = tf.data.Dataset.list_files(POS+'*')
     neg = tf.data.Dataset.list_files(NEG+'*')
@@ -38,14 +40,13 @@ if __name__ == "__main__":
     negatives = tf.data.Dataset.zip((neg, tf.data.Dataset.from_tensor_slices(tf.zeros(len(neg)))))
     data = positives.concatenate(negatives)
 
+    #filepath, label = positives.shuffle(buffer_size=10000).as_numpy_iterator().next()
 
-    filepath, label = positives.shuffle(buffer_size=10000).as_numpy_iterator().next()
+    #spectrogram, label = preprocess(filepath, label)
 
-    spectrogram, label = preprocess(filepath, label)
-
-    plt.figure(figsize=(30, 20))
-    plt.imshow(tf.transpose(spectrogram)[0])
-    plt.show()
+    #plt.figure(figsize=(30, 20))
+    #plt.imshow(tf.transpose(spectrogram)[0])
+    #plt.show()
 
     data = data.map(preprocess)
     data = data.cache()
@@ -53,13 +54,14 @@ if __name__ == "__main__":
     data = data.batch(2)
     data = data.prefetch(1)
 
-    train = data.take(113)
-    test = data.skip(113).take(48)
+    train = data.take(50)
+    test = data.skip(50).take(25)
+    """
 
-    samples, labels = train.as_numpy_iterator().next()
-    print("-----------------------------------------------------")
-    print(samples.shape)
-    print("-----------------------------------------------------")
+    #samples, labels = train.as_numpy_iterator().next()
+    #print("-----------------------------------------------------")
+    #print(samples.shape)
+    #print("-----------------------------------------------------")
 
     model = Sequential()
     model.add(Conv2D(16, (3, 3), activation='relu', input_shape=(1496, 257, 1)))
@@ -71,7 +73,7 @@ if __name__ == "__main__":
     model.compile('Adam', loss='BinaryCrossentropy', metrics=[tf.keras.metrics.Recall(), tf.keras.metrics.Precision()])
     model.summary()
 
-    hist = model.fit(train, epochs=6, validation_data=test)
+    hist = model.fit(train, epochs=10, validation_data=test)
 
     plt.title('Loss')
     plt.plot(hist.history['loss'], 'r')
@@ -94,3 +96,25 @@ if __name__ == "__main__":
         yhat = [1 if prediction > 0.5 else 0 for prediction in yhat]
         print(yhat)
         print(y_test.astype(int))
+
+    model.save("model")
+    """
+
+    model = keras.models.load_model("model")
+    successes = 0
+    fails = 0
+    for x in range(25):
+        X_test, y_test = test.as_numpy_iterator().next()
+        yhat = model.predict(X_test)
+        yhat = [1 if prediction > 0.5 else 0 for prediction in yhat]
+        if(yhat[0] == y_test.astype(int)[0]):
+            successes += 1
+        else:
+            fails += 1
+        if (yhat[1] == y_test.astype(int)[1]):
+            successes += 1
+        else:
+            fails += 1
+
+    print(successes)
+    print(fails)
