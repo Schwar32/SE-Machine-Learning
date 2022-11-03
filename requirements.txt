@@ -87,7 +87,6 @@ pyrsistent==0.18.1
 PySoundFile==0.9.0.post1
 python-dateutil==2.8.2
 pytz==2022.5
-pywin32==304
 pywinpty==2.0.9
 pyzmq==24.0.1
 qtconsole==5.3.2
