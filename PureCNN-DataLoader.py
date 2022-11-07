@@ -1,7 +1,3 @@
-#!/usr/bin/env python
-
-# In[1]:
-
 import datetime
 import pandas as pd
 import numpy as np
@@ -12,25 +8,20 @@ import tensorflow_io as tfio
 
 import keras.models
 from keras.utils import to_categorical
+from keras import Model
+from keras.layers import Flatten, Dense, Dropout, GaussianNoise
+from keras.applications.vgg16 import VGG16
 
 from sklearn.preprocessing import LabelEncoder
 
-from keras.layers import Flatten, Dense, Dropout, GaussianNoise
-from keras import Model
 
-from keras.applications.vgg16 import VGG16
-
-# In[2]:
-
-
-def load_audio(file_name):
-    audio_data, sample_rate = sf.read(file_name.numpy())
+# Loads in audio file and return wav data
+def load_audio(file_path):
+    audio_data, sample_rate = sf.read(file_path.numpy())
     return audio_data
 
 
-# In[3]:
-
-
+# Takes in a file and returns a processed (224, 224, 3) spectrogram
 def preprocess(file_path):
     [wav, ] = tf.py_function(load_audio, [file_path], [tf.float32])
     wav = wav[:960000]
@@ -54,20 +45,51 @@ def preprocess(file_path):
     return time_mask
 
 
-# In[4]:
+# Takes in a file path and returns the spectrogram and label
+def process_images(file_path, label):
+    spectrogram = preprocess(file_path)
+    return spectrogram, label
 
 
+# Takes in an optional cutoff point and returns the dataset, number of labels, and csv dataframe
+def load_data(cutoff):
+    global label_encoder
+    cols = ["filename", "primary_label"]
+    df = pd.read_csv("./Data/train_metadata.csv", usecols=cols)
+    if cutoff is not None:
+        df = df.loc[df['primary_label'] <= cutoff]
+    untouched_df = df.copy()
+    df['file_path'] = df.apply(lambda row: "./Data/Audio/" + row.primary_label + "/" + row.filename, axis=1)
+    images = df["file_path"]
+
+    labels = df.pop('primary_label')
+    labels = to_categorical(label_encoder.fit_transform(labels))
+
+    output = tf.data.Dataset.from_tensor_slices((images, labels))
+    return output, labels.shape[1], untouched_df
+
+
+# Takes in data and a batch size, prepares the data for training, and returns
+def setup_data(data, batch_size):
+    autotune = tf.data.experimental.AUTOTUNE
+
+    data = data.map(process_images, num_parallel_calls=autotune)
+    data = data.shuffle(buffer_size=1024)
+    data = data.batch(batch_size)
+    data = data.prefetch(autotune)
+    return data
+
+
+# Creates a new model using VGG16 cnn architecture with transfer learning
 def create_model(num_labels):
     cnn = VGG16(input_shape=[224, 224, 3], weights='imagenet', include_top=False)
-    
+
     for layer in cnn.layers:
         layer.trainable = False
 
-    x = Flatten()(cnn.output) 
-    output = GaussianNoise(0.1)(x)
-    output = Dropout(0.5)(output)
-    output = Dense(units=num_labels, activation='softmax')(output)
-    
+    x = Flatten()(cnn.output)
+    output = Dense(units=num_labels, activation='softmax')(x)
+
     model = Model([cnn.input], [output])
     model.summary()
     optimizer = keras.optimizers.Adam(learning_rate=0.0001, decay=0.001)
@@ -76,12 +98,10 @@ def create_model(num_labels):
     return model
 
 
-# In[5]:
-
-
-def train_model(model, train, test, num_labels, epoch_amt, save):
-    if model is None:
-        model = create_model(num_labels)
+# Trains the model on given data
+def train_model(training_model, training_data, testing_data, num_labels, epoch_amt, save):
+    if training_model is None:
+        training_model = create_model(num_labels)
 
     log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
@@ -90,131 +110,86 @@ def train_model(model, train, test, num_labels, epoch_amt, save):
                                                  mode='max',
                                                  monitor='val_categorical_accuracy',
                                                  save_best_only=True)
-    
-    model.fit(train, validation_data=test, epochs=epoch_amt, callbacks=[tensorboard_callback, checkpoint], verbose=True)
-    
+
+    training_model.fit(training_data, validation_data=testing_data, epochs=epoch_amt,
+                       callbacks=[tensorboard_callback, checkpoint], verbose=True)
+
     if save:
-        model.save("model")
+        training_model.save("model")
 
-    return model
-
-
-# In[6]:
+    return training_model
 
 
-def predict_file(file_name, model):
-    image = preprocess(file_name)
+# Takes in an audio file and model and returns predicted bird
+def predict_file(file_path):
+    global model
+    image = preprocess(file_path)
     image = image.numpy().reshape(1, 224, 224, 3)
     predicted_label = model.predict([image], verbose=False)
     return predicted_label
 
 
-# In[7]:
-
-
-def process_images(input_path, label):
-    spectrogram = preprocess(input_path)
-    return spectrogram, label
-
-
-# In[8]:
-
-
-physical_devices = tf.config.list_physical_devices("GPU")
-tf.config.experimental.set_memory_growth(physical_devices[0], True)
-
-
-# In[9]:
-
-
-cols = ["filename", "primary_label"]
-df = pd.read_csv("./Data/train_metadata.csv", usecols=cols)
-#df = df.loc[df['primary_label'] <= "clcrob"]
-saved_df = df.copy()
-
-
-# In[10]:
-
-
-df['file_path'] = df.apply(lambda row: "./Data/Audio/" + row.primary_label + "/" + row.filename, axis=1)
-images = df["file_path"]
-
-
-# In[11]:
-
-
-labels = df.pop('primary_label')
-labels_encoder = LabelEncoder()
-labels = to_categorical(labels_encoder.fit_transform(labels))
-
-
-# In[12]:
-
-
-dataset = tf.data.Dataset.from_tensor_slices((images, labels))
-
-
-# In[13]:
-
-
-AUTOTUNE = tf.data.experimental.AUTOTUNE
-BATCH_SIZE = 32
-
-dataset = dataset.map(process_images, num_parallel_calls=AUTOTUNE)
-dataset = dataset.shuffle(buffer_size=1024)
-dataset = dataset.batch(BATCH_SIZE)
-dataset = dataset.prefetch(AUTOTUNE)
-
-
-# In[14]:
-
-
-training_size = int(len(dataset) * .80)        # 80% of data is for training
-testing_size = len(dataset) - training_size    # 20% of data is for validating
-
-train = dataset.take(training_size)
-test = dataset.skip(training_size).take(testing_size)
-
-
-# In[ ]:
-
-
-#model = keras.models.load_model("model")
-model = train_model(model=None, train=train, test=test, num_labels=labels.shape[1], epoch_amt=20, save=True)
-
-
-# In[ ]:
-
-
-prediction = predict_file("./Data/Audio/acafly/XC31063.ogg", model, labels_encoder)
-classes_x = np.argmax(prediction, axis=1)
-prediction_class = labels_encoder.inverse_transform(classes_x)
-str(prediction_class[0]) + " with " + str(prediction[0][classes_x][0]*100) + "% confidence"
-
-
-# In[ ]:
-
-
-model.evaluate(train)
-
-
-# In[ ]:
-
-
-model.evaluate(test)
-
-
-# In[ ]:
-
-
-#Accuracy on data
-count = 0
-correct = 0
-for index_num, row in saved_df.iterrows():
-    prediction = predict_file("./Data/Audio/" + row["primary_label"] + "/" + row["filename"], model)
+# Takes in audio file and prints a detailed description of the prediction
+def detailed_prediction(file_path):
+    global label_encoder
+    prediction = predict_file(file_path)
     classes_x = np.argmax(prediction, axis=1)
-    prediction_class = labels_encoder.inverse_transform(classes_x)
-    if prediction_class[0] == row["primary_label"]:
-        correct += 1
-        print(str(correct/count) + ": " + row["primary_label"] + " - " + prediction_class)
-    count += 1
+    prediction_class = label_encoder.inverse_transform(classes_x)
+    print(str(prediction_class[0]) + " with " + str(prediction[0][classes_x][0] * 100) + "% confidence")
+
+
+# Takes in csv dataframe and prints out one by one the success of a prediction on each file
+def predict_all(df):
+    global label_encoder
+    count = 0
+    correct = 0
+
+    for index_num, row in df.iterrows():
+        prediction = predict_file("./Data/Audio/" + row["primary_label"] + "/" + row["filename"])
+        classes_x = np.argmax(prediction, axis=1)
+        prediction_class = label_encoder.inverse_transform(classes_x)
+        if prediction_class[0] == row["primary_label"]:
+            correct += 1
+        count += 1
+        print(str(correct / count) + ": " + row["primary_label"] + " - " + prediction_class)
+    print("FINAL RESULT: " + str(correct / count))
+
+
+# Takes in the testing data, training data, and dataframe of training csv and prints out some checks
+def check_model(training_data, testing_data, df):
+    print("EVALUATING ON TRAINING DATA")
+    model.evaluate(training_data)
+    print("EVALUATING ON TESTING DATA")
+    model.evaluate(testing_data)
+    print("EVALUATING ON ALL DATA")
+    predict_all(df)
+    print("PREDICTING ./Data/Audio/acafly/XC31063.ogg")
+    detailed_prediction("./Data/Audio/acafly/XC31063.ogg")
+
+
+if __name__ == "__main__":
+    # Comment out these two lines if not using GPU
+    physical_devices = tf.config.list_physical_devices("GPU")
+    tf.config.experimental.set_memory_growth(physical_devices[0], True)
+
+    TRAINING_SIZE = .80
+    BATCH_SIZE = 32
+    EPOCH_AMOUNT = 10
+
+    label_encoder = LabelEncoder()
+
+    dataset, label_count, saved_df = load_data(cutoff="clcrob")
+    dataset = setup_data(dataset, BATCH_SIZE)
+
+    training_size = int(len(dataset) * TRAINING_SIZE)
+    testing_size = len(dataset) - training_size
+
+    train = dataset.take(training_size)
+    test = dataset.skip(training_size).take(testing_size)
+
+    # model = keras.models.load_model("model")
+    model = train_model(training_model=None, training_data=train, testing_data=test, num_labels=label_count,
+                        epoch_amt=EPOCH_AMOUNT, save=True)
+
+    # Accuracy on data
+    check_model(training_data=train, testing_data=test, df=saved_df)
