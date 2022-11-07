@@ -10,6 +10,7 @@ import keras.models
 from keras.utils import to_categorical
 from keras import Model
 from keras.layers import Flatten, Dense, Dropout, GaussianNoise
+from keras import regularizers
 from keras.applications.vgg16 import VGG16
 
 from sklearn.preprocessing import LabelEncoder
@@ -88,11 +89,12 @@ def create_model(num_labels):
         layer.trainable = False
 
     x = Flatten()(cnn.output)
-    output = Dense(units=num_labels, activation='softmax')(x)
+    output = GaussianNoise(0.1)(x)
+    output = Dense(units=num_labels, activation='softmax')(output)
 
     model = Model([cnn.input], [output])
     model.summary()
-    optimizer = keras.optimizers.Adam(learning_rate=0.0001, decay=0.001)
+    optimizer = keras.optimizers.Adam(learning_rate=0.001, decay=0.001)
     model.compile(optimizer=optimizer, loss='categorical_crossentropy',
                   metrics=[keras.metrics.CategoricalAccuracy(), keras.metrics.Recall(), keras.metrics.Precision()])
     return model
@@ -161,10 +163,10 @@ def check_model(training_data, testing_data, df):
     model.evaluate(training_data)
     print("EVALUATING ON TESTING DATA")
     model.evaluate(testing_data)
-    print("EVALUATING ON ALL DATA")
-    predict_all(df)
     print("PREDICTING ./Data/Audio/acafly/XC31063.ogg")
     detailed_prediction("./Data/Audio/acafly/XC31063.ogg")
+    print("EVALUATING ON ALL DATA")
+    predict_all(df)
 
 
 if __name__ == "__main__":
@@ -173,12 +175,12 @@ if __name__ == "__main__":
     tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
     TRAINING_SIZE = .80
-    BATCH_SIZE = 32
-    EPOCH_AMOUNT = 10
+    BATCH_SIZE = 8
+    EPOCH_AMOUNT = 8
 
     label_encoder = LabelEncoder()
 
-    dataset, label_count, saved_df = load_data(cutoff="clcrob")
+    dataset, label_count, saved_df = load_data(cutoff=None)
     dataset = setup_data(dataset, BATCH_SIZE)
 
     training_size = int(len(dataset) * TRAINING_SIZE)
