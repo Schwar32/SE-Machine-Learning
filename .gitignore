@@ -1,3 +1,6 @@
 /Data/Audio
 
 .idea
+.ipynb_checkpoints
+venv
+logs
