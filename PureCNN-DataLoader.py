@@ -23,14 +23,14 @@ def load_audio(file_path):
 
 
 # Takes in a file and returns a processed (224, 224, 3) spectrogram
-def preprocess(file_path):
+def preprocess(file_path, training):
     [wav, ] = tf.py_function(load_audio, [file_path], [tf.float32])
     wav = wav[:960000]
     zero_padding = tf.zeros([960000] - tf.shape(wav), dtype=tf.float32)
     wav = tf.concat([zero_padding, wav], 0)
 
     spectrogram = tfio.audio.spectrogram(
-        wav, nfft=4096, window=4096, stride=int(960000/224) + 1)
+        wav, nfft=2048, window=2048, stride=int(960000/224) + 1)
 
     mel_spectrogram = tfio.audio.melscale(
         spectrogram, rate=32000, mels=224, fmin=0, fmax=16000)
@@ -38,24 +38,48 @@ def preprocess(file_path):
     dbscale_mel_spectrogram = tfio.audio.dbscale(
         mel_spectrogram, top_db=80)
 
-    dbscale_mel_spectrogram = tf.expand_dims(dbscale_mel_spectrogram, axis=2)
-    dbscale_mel_spectrogram = tf.repeat(dbscale_mel_spectrogram, repeats=3, axis=2)
-    dbscale_mel_spectrogram = tf.divide(
-        tf.add(tf.subtract(
-            dbscale_mel_spectrogram,
-            tf.reduce_min(dbscale_mel_spectrogram)
-        ), tf.keras.backend.epsilon()),
-        tf.maximum(tf.subtract(
-            tf.reduce_max(dbscale_mel_spectrogram),
-            tf.reduce_min(dbscale_mel_spectrogram)
-        ), tf.keras.backend.epsilon() * 2),
-    )
-    return dbscale_mel_spectrogram
 
+    if training:
+        freq_mask = tfio.audio.freq_mask(dbscale_mel_spectrogram, param=5)
+        time_mask = tfio.audio.time_mask(freq_mask, param=5)
+        time_mask = tf.expand_dims(time_mask, axis=2)
+        time_mask = tf.repeat(time_mask, repeats=3, axis=2)
+        noise = tf.random.normal(shape=tf.shape(time_mask), mean=0.0, stddev=.5, seed=1, dtype=tf.float32)
+        output = time_mask + noise
+        output = tf.divide(
+            tf.add(tf.subtract(
+                output,
+                tf.reduce_min(output)
+            ), tf.keras.backend.epsilon()),
+            tf.maximum(tf.subtract(
+                tf.reduce_max(output),
+                tf.reduce_min(output)
+            ), tf.keras.backend.epsilon() * 2),
+        )
+        return output
+    else:
+        dbscale_mel_spectrogram = tf.expand_dims(dbscale_mel_spectrogram, axis=2)
+        dbscale_mel_spectrogram = tf.repeat(dbscale_mel_spectrogram, repeats=3, axis=2)
+        dbscale_mel_spectrogram = tf.divide(
+            tf.add(tf.subtract(
+                dbscale_mel_spectrogram,
+                tf.reduce_min(dbscale_mel_spectrogram)
+            ), tf.keras.backend.epsilon()),
+            tf.maximum(tf.subtract(
+                tf.reduce_max(dbscale_mel_spectrogram),
+                tf.reduce_min(dbscale_mel_spectrogram)
+            ), tf.keras.backend.epsilon() * 2),
+        )
+        return dbscale_mel_spectrogram
 
 # Takes in a file path and returns the spectrogram and label
-def process_images(file_path, label):
-    spectrogram = preprocess(file_path)
+def process_training_images(file_path, label):
+    spectrogram = preprocess(file_path, True)
+    return spectrogram, label
+
+
+def process_non_training_images(file_path, label):
+    spectrogram = preprocess(file_path, False)
     return spectrogram, label
 
 
@@ -66,8 +90,8 @@ def load_data(cutoff):
     df = pd.read_csv("./Data/train_metadata.csv", usecols=cols)
     if cutoff is not None:
         df = df.loc[df['primary_label'] <= cutoff]
-    counts = df['primary_label'].value_counts()
-    df = df[~df['primary_label'].isin(counts[counts < 150].index)]  # Removes birds that have less than 75 calls from df
+    # counts = df['primary_label'].value_counts()
+    # df = df[~df['primary_label'].isin(counts[counts < 150].index)]  # Removes birds that have less than 75 calls from df
     untouched_df = df.copy()
     df['file_path'] = df.apply(lambda row: "./Data/Audio/" + row.primary_label + "/" + row.filename, axis=1)
     images = df["file_path"]
@@ -80,10 +104,20 @@ def load_data(cutoff):
 
 
 # Takes in data and a batch size, prepares the data for training, and returns
-def setup_data(data, batch_size):
+def setup_training_data(data, batch_size):
     autotune = tf.data.experimental.AUTOTUNE
 
-    data = data.map(process_images, num_parallel_calls=autotune)
+    data = data.map(process_training_images, num_parallel_calls=autotune)
+    data = data.shuffle(buffer_size=2048, seed=0)
+    data = data.batch(batch_size)
+    data = data.prefetch(autotune)
+    return data
+
+
+def setup_non_training_data(data, batch_size):
+    autotune = tf.data.experimental.AUTOTUNE
+
+    data = data.map(process_non_training_images, num_parallel_calls=autotune)
     data = data.shuffle(buffer_size=2048, seed=0)
     data = data.batch(batch_size)
     data = data.prefetch(autotune)
@@ -93,21 +127,22 @@ def setup_data(data, batch_size):
 # Creates a new model using VGG16 cnn architecture with transfer learning
 def create_model(num_labels):
     input_layer = Input(shape=(224, 224, 3))
-    noise = GaussianNoise(0.4)(input_layer, training=True)
-    cnn = VGG16(input_shape=[224, 224, 3], input_tensor=noise, weights='imagenet', include_top=False)
+    cnn = VGG16(input_shape=[224, 224, 3], input_tensor=input_layer, weights='imagenet', include_top=False)
 
     for layer in cnn.layers[:-2]:
         layer.trainable = False
 
     x = Flatten()(cnn.output)
     x = Dense(4096, activation='relu', kernel_regularizer=regularizers.l2(0.01))(x)
+    x = Dropout(0.5)(x)
     x = Dense(1024, activation='relu', kernel_regularizer=regularizers.l2(0.01))(x)
+    x = Dropout(0.5)(x)
     x = Dense(512, activation='relu', kernel_regularizer=regularizers.l2(0.01))(x)
-    x = Dropout(0.6)(x)
+    x = Dropout(0.5)(x)
     output = Dense(units=num_labels, activation='softmax')(x)
 
     model = Model([input_layer], [output])
-    optimizer = keras.optimizers.Adam(learning_rate=0.00001)
+    optimizer = keras.optimizers.Adam(learning_rate=0.0001)
     model.compile(optimizer=optimizer, loss='categorical_crossentropy',
                   metrics=[keras.metrics.CategoricalAccuracy(), keras.metrics.Recall(), keras.metrics.Precision()])
     return model
@@ -139,7 +174,7 @@ def train_model(training_model, training_data, validation_data, num_labels, epoc
 # Takes in an audio file and model and returns predicted bird
 def predict_file(file_path):
     global model
-    image = preprocess(file_path)
+    image = preprocess(file_path, False)
     # plt.imshow(image)
     # plt.show()
     image = image.numpy().reshape(1, 224, 224, 3)
@@ -204,23 +239,40 @@ if __name__ == "__main__":
     TRAINING_SIZE = .60
     VALIDATION_SIZE = .20
     BATCH_SIZE = 16
-    EPOCH_AMOUNT = 75
-    SHOW_AMOUNT = 5
+    EPOCH_AMOUNT = 100
+    SHOW_AMOUNT = 10
     label_encoder = LabelEncoder()
 
     dataset, label_count, saved_df = load_data(cutoff="d")
-    dataset = setup_data(dataset, BATCH_SIZE)
+    dataset = dataset.shuffle(buffer_size=2048, seed=0)
 
     training_size = int(len(dataset) * TRAINING_SIZE)
     validating_size = int(len(dataset) * VALIDATION_SIZE)
     testing_size = int(len(dataset) - training_size - validating_size)
 
     train = dataset.take(training_size)
-    validation = dataset.skip(training_size).take(validating_size)
-    testing = dataset.skip(training_size).skip(validating_size).take(testing_size)
+    testing_dataset = dataset.skip(training_size)
+    validation = testing_dataset.skip(validating_size)
+    testing = testing_dataset.take(validating_size)
+
+    train = setup_training_data(train, BATCH_SIZE)
+    validation = setup_non_training_data(validation, BATCH_SIZE)
+    testing = setup_non_training_data(testing, BATCH_SIZE)
 
     """
     for x in train:
+        print(np.min(x[0][0].numpy()))
+        print(np.max(x[0][0].numpy()))
+        plt.imshow(x[0][0].numpy())
+        plt.show()
+        break
+    for x in validation:
+        print(np.min(x[0][0].numpy()))
+        print(np.max(x[0][0].numpy()))
+        plt.imshow(x[0][0].numpy())
+        plt.show()
+        break
+    for x in testing:
         print(np.min(x[0][0].numpy()))
         print(np.max(x[0][0].numpy()))
         plt.imshow(x[0][0].numpy())
@@ -233,3 +285,5 @@ if __name__ == "__main__":
                         epoch_amt=EPOCH_AMOUNT, save=True)
     # Accuracy on data
     check_model(testing_data=testing, df=saved_df, show_amount=SHOW_AMOUNT)
+
+    # tensorboard --logdir=logs/fit --host localhost --port 8088
