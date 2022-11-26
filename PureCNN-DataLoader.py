@@ -242,7 +242,7 @@ if __name__ == "__main__":
     TRAINING_SIZE = .60
     VALIDATION_SIZE = .20
     BATCH_SIZE = 16
-    EPOCH_AMOUNT = 1
+    EPOCH_AMOUNT = 10
     SHOW_AMOUNT = 5
     label_encoder = LabelEncoder()
 
